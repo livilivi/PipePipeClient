@@ -18,6 +18,8 @@ import org.schabi.newpipe.util.CookieUtils;
 import org.schabi.newpipe.util.InfoCache;
 import org.schabi.newpipe.util.TLSSocketFactoryCompat;
 
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
@@ -29,6 +31,8 @@ import java.security.KeyManagementException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
@@ -48,6 +52,9 @@ public final class DownloaderImpl extends Downloader {
     private Integer customTimeout;
 
     private DownloaderImpl(final OkHttpClient.Builder builder) {
+        // Apply SSL error ignoring to the builder
+        ignoreAllSSLErrors(builder);
+        
         this.client = builder
                 .readTimeout(30, TimeUnit.SECONDS)
 //                .cache(new Cache(new File(context.getExternalCacheDir(), "okhttp"),
@@ -120,6 +127,48 @@ public final class DownloaderImpl extends Downloader {
 
             builder.connectionSpecs(Arrays.asList(legacyTLS, ConnectionSpec.CLEARTEXT));
         } catch (final KeyManagementException | NoSuchAlgorithmException | KeyStoreException e) {
+            if (DEBUG) {
+                e.printStackTrace();
+            }
+        }
+    }
+    
+    /**
+     * Ignore all SSL errors by using a naive trust manager and hostname verifier.
+     * This should only be used when absolutely necessary, as it compromises security.
+     *
+     * @param builder The HTTPClient Builder on which to ignore SSL errors (will be modified in-place)
+     */
+    private static void ignoreAllSSLErrors(final OkHttpClient.Builder builder) {
+        try {
+            // Create a naive trust manager that trusts all certificates
+            final X509TrustManager naiveTrustManager = new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {
+                    // No verification
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {
+                    // No verification
+                }
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new X509Certificate[0];
+                }
+            };
+
+            // Create an SSL context with our naive trust manager
+            final SSLContext sslContext = SSLContext.getInstance("TLSv1.2");
+            sslContext.init(null, new TrustManager[]{naiveTrustManager}, new SecureRandom());
+
+            // Set the socket factory and trust manager
+            builder.sslSocketFactory(sslContext.getSocketFactory(), naiveTrustManager);
+            
+            // Set a hostname verifier that accepts all hostnames
+            builder.hostnameVerifier((hostname, session) -> true);
+        } catch (final KeyManagementException | NoSuchAlgorithmException e) {
             if (DEBUG) {
                 e.printStackTrace();
             }
@@ -231,13 +280,15 @@ public final class DownloaderImpl extends Downloader {
         okhttp3.Response response = null;
 
         if(url.contains("pipepipe.dev")) {
-            tmpClient = new OkHttpClient.Builder()
-                    .readTimeout(30, TimeUnit.SECONDS)
-                    .build();
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                    .readTimeout(30, TimeUnit.SECONDS);
+            ignoreAllSSLErrors(builder);
+            tmpClient = builder.build();
         } else if (customTimeout != null) {
-            tmpClient = new OkHttpClient.Builder()
-                    .readTimeout(customTimeout, TimeUnit.SECONDS)
-                    .build();
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                    .readTimeout(customTimeout, TimeUnit.SECONDS);
+            ignoreAllSSLErrors(builder);
+            tmpClient = builder.build();
         }
 
         int maxRetries = 2;
@@ -332,9 +383,10 @@ public final class DownloaderImpl extends Downloader {
 
         OkHttpClient tmpClient = client;
         if (customTimeout != null) {
-            tmpClient = new OkHttpClient.Builder()
-                    .readTimeout(customTimeout, TimeUnit.SECONDS)
-                    .build();
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                    .readTimeout(customTimeout, TimeUnit.SECONDS);
+            ignoreAllSSLErrors(builder);
+            tmpClient = builder.build();
         }
 
         Call call = tmpClient.newCall(requestBuilder.build());
